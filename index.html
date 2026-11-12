@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=28">
+  <link rel="stylesheet" href="style.css?v=33">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
@@ -21,12 +21,12 @@
       </h1>
       <nav id="page-nav" class="page-nav" aria-label="Pages" hidden>
         <div id="schedules-wrap" class="nav-menu">
-          <button id="schedules-button" type="button" class="page-link nav-menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="schedules-menu">
-            Schedules <span class="nav-caret" aria-hidden="true"></span>
+          <button id="schedules-button" type="button" class="page-link nav-menu-button has-badge" aria-haspopup="menu" aria-expanded="false" aria-controls="schedules-menu">
+            Schedules <span class="nav-caret" aria-hidden="true"></span><span id="schedules-badge" class="count-badge" hidden></span>
           </button>
           <div id="schedules-menu" class="nav-dropdown" role="menu" hidden>
             <button type="button" class="menu-item" role="menuitem" data-page="calendar">Lab Calendar</button>
-            <button type="button" class="menu-item" role="menuitem" data-page="update">Update Your Availability</button>
+            <button type="button" class="menu-item has-badge" role="menuitem" data-page="update">Update Your Availability<span id="update-menu-badge" class="count-badge inline" hidden></span></button>
           </div>
         </div>
         <button id="admin-link" type="button" class="page-link" data-page="admin" hidden>Administrative Schedules</button>
@@ -98,8 +98,12 @@
     </div>
 
     <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update Your Availability</button>.</p>
-    <div id="role-filters" class="role-filters" aria-label="Filter by role" hidden></div>
-    <div id="filters" class="filters" aria-label="Filter by lab member"></div>
+    <!-- Team Availability's filters start folded away. -->
+    <details id="team-filters" class="team-filters" hidden>
+      <summary><span class="team-filters-title">Filters</span> <span id="team-filters-count" class="muted"></span></summary>
+      <div id="role-filters" class="role-filters" aria-label="Filter by role"></div>
+      <div id="filters" class="filters" aria-label="Filter by lab member"></div>
+    </details>
 
     <div class="calendar-layout">
       <aside class="mini" aria-label="Jump to a date">
@@ -197,7 +201,7 @@
       <div class="tabs" role="tablist">
         <button type="button" class="tab" role="tab" data-tab="class" aria-selected="true">Class Schedule</button>
         <button type="button" class="tab" role="tab" data-tab="conflict" aria-selected="false">Standing Conflict</button>
-        <button type="button" class="tab" role="tab" data-tab="ooo" aria-selected="false">Request Time Off</button>
+        <button type="button" class="tab has-badge" role="tab" data-tab="ooo" aria-selected="false">Request Time Off<span id="ooo-badge" class="count-badge" hidden></span></button>
         <button type="button" class="tab" role="tab" data-tab="entries" aria-selected="false">My Availability</button>
       </div>
 
@@ -286,6 +290,9 @@
       <p id="upload-status" class="status" role="status"></p>
 
       <button id="save" type="button" class="primary">Save</button>
+
+      <!-- Under Request Time Off: your requests, waiting and decided, with any note from the lab manager. -->
+      <div id="my-requests" class="my-requests" hidden></div>
     </section>
 
     <section id="page-profile" class="upload" hidden>
@@ -347,14 +354,14 @@
         </div>
       </div>
       <div class="sheet">
-        <div id="directory-list"></div>
         <div id="directory-tabs" class="sheet-tabs" role="tablist" aria-label="Show"></div>
+        <div id="directory-list"></div>
       </div>
     </section>
 
     <section id="page-manage" class="upload" hidden>
-      <h2>Lab Management</h2>
-      <p class="muted">Review requests from lab members, manage who has access and what they're trained for, and choose your emails.</p>
+      <h2 id="manage-heading">Lab Management</h2>
+      <p id="manage-intro" class="muted">Review requests from lab members, manage who has access and what they're trained for, and choose your emails.</p>
 
       <div class="tabs" role="tablist">
         <button type="button" class="manage-tab has-badge" role="tab" data-manage="review" aria-selected="true">Review Requests<span id="review-badge" class="count-badge" hidden></span></button>
@@ -385,7 +392,7 @@
       </div>
 
       <div id="manage-settings" hidden>
-        <p class="muted">Choose which emails you get. Your profile is under My Profile in the menu at the top right, and your own training is under Lab members with everyone else's.</p>
+        <p class="muted">Choose which emails you get.</p>
         <div id="my-info"></div>
       </div>
 
@@ -400,20 +407,13 @@
           <label class="field">Name
             <input id="new-member-name" type="text" autocomplete="off">
           </label>
-          <label class="field">Directory role
-            <select id="new-member-title"></select>
-          </label>
           <label class="field">Role
-            <select id="new-member-role">
-              <option value="ra">RA (sees only their own; changes need review)</option>
-              <option value="grad">Grad Student/Post-Doc (sees only their own; changes save without review)</option>
-              <option value="reviewer">Reviewer (sees everyone, reviews requests)</option>
-            </select>
+            <select id="new-member-title"></select>
           </label>
         </div>
         <div id="new-member-skills"></div>
         <button id="add-member" type="button" class="primary">Add to lab</button>
-        <p class="muted">To change someone's role or training, use their card above. To change their name, add them again with the same email.</p>
+        <p class="muted field-note">RAs' changes need review. PhD Students, Post-Docs and the PI save their own without review. Lab Managers see everyone and manage the lab.</p>
       </div>
 
       <p id="manage-status" class="status" role="status"></p>
@@ -448,9 +448,9 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" integrity="sha384-I1LYojsZ5RM1cOda44Z2h42Qa6YfsQ1XkXxREnhp4ueYBR/4d1pG1K+NZM537Vsj" crossorigin="anonymous"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" integrity="sha384-Ke0FJhH7LyRqDxZ0wt+/OXV38yfQVu7g9VPEEGjYmB4RVOY/ta04uecRhsMwT7V3" crossorigin="anonymous"></script>
   <script src="firebase-config.js?v=4"></script>
-  <script src="store.js?v=11"></script>
+  <script src="store.js?v=12"></script>
   <script src="parser.js?v=2"></script>
-  <script src="scheduling.js?v=17"></script>
-  <script src="app.js?v=38"></script>
+  <script src="scheduling.js?v=21"></script>
+  <script src="app.js?v=43"></script>
 </body>
 </html>

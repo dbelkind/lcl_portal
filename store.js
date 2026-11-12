@@ -43,7 +43,8 @@ const Store = (() => {
     // Lab members can't see the lab list, only who the reviewers are, so bookers can email them and the site can say
     // who's emailed about what someone does.
     async listReviewers() {
-      return (await db.collection("members").where("role", "==", "reviewer").get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
+      // The PI is included, since in Lab Management Mode they can choose to get the lab managers' emails.
+      return (await db.collection("members").where("role", "in", ["reviewer", "pi"]).get()).docs.map((doc) => ({ email: doc.id, ...doc.data() }));
     },
 
     // Pass an email to get one person's entries. Only reviewers may leave it out.

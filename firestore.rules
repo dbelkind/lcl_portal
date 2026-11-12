@@ -15,20 +15,26 @@ service cloud.firestore {
     function isMember() {
       return verified() && exists(memberPath());
     }
+    // Lab managers, and the PI while they've turned on Lab Management Mode. Matches actsAsLabManager in scheduling.js.
     function isReviewer() {
-      return isMember() && get(memberPath()).data.role == 'reviewer';
+      return isMember() && (get(memberPath()).data.role == 'reviewer'
+        || (get(memberPath()).data.role == 'pi' && get(memberPath()).data.get('labManagement', false) == true));
     }
-    // Grad Students/Post-Docs change their own entries and approve their own time off without review.
+    // PhD Students, Post-Docs and the PI change their own entries and approve their own time off without review.
     function isGrad() {
-      return isMember() && get(memberPath()).data.role == 'grad';
+      return isMember() && get(memberPath()).data.role in ['grad', 'pi'];
     }
     // Anyone with the Booking responsibility can book participants into visits.
     function isBooker() {
       return isMember() && get(memberPath()).data.get('skills', []).hasAny(['Booking']);
     }
-    // Matches titleOf in scheduling.js: the directory role someone gets until a lab manager picks one.
-    function defaultTitle(member) {
-      return member.role == 'reviewer' ? 'Lab Manager' : (member.role == 'grad' ? 'PhD Student' : 'RA');
+    // Matches titleOf in scheduling.js: each role is also a place in the lab directory.
+    function titleFor(member) {
+      return member.role == 'pi' ? 'PI' : (member.role == 'reviewer' ? 'Lab Manager'
+        : (member.role == 'grad' ? (member.get('title', '') == 'Post-Doc' ? 'Post-Doc' : 'PhD Student') : 'RA'));
+    }
+    function emailKinds() {
+      return ['requests', 'updates', 'bookings', 'cancellations', 'scanReminders', 'celebrations', 'missingSchedules', 'websiteUpdates'];
     }
     function owns(data) {
       return isMember() && data.ownerEmail == email();
@@ -90,19 +96,26 @@ service cloud.firestore {
     // Everyone in the lab can look up the reviewers: bookers email them a booking's participant details, and the site
     // shows who's emailed about what someone does.
     match /members/{memberEmail} {
-      allow get: if verified() && (memberEmail == email() || isReviewer() || (isMember() && resource.data.role == 'reviewer'));
-      allow list: if isReviewer() || (isMember() && resource.data.role == 'reviewer');
+      allow get: if verified() && (memberEmail == email() || isReviewer() || (isMember() && resource.data.role in ['reviewer', 'pi']));
+      allow list: if isReviewer() || (isMember() && resource.data.role in ['reviewer', 'pi']);
       allow create, update: if isReviewer()
         && memberEmail == memberEmail.lower()
-        && request.resource.data.keys().hasOnly(['name', 'role', 'skills', 'notify', 'emails', 'title'])
+        && request.resource.data.keys().hasOnly(['name', 'role', 'skills', 'notify', 'emails', 'title', 'labManagement'])
         && request.resource.data.name is string && request.resource.data.name.size() > 0
-        && request.resource.data.role in ['member', 'ra', 'grad', 'reviewer']
+        && request.resource.data.role in ['member', 'ra', 'grad', 'reviewer', 'pi']
+        && (!('labManagement' in request.resource.data) || request.resource.data.labManagement is bool)
         && (!('skills' in request.resource.data)
           || (request.resource.data.skills is list && request.resource.data.skills.size() <= 10))
         && (!('notify' in request.resource.data) || request.resource.data.notify is bool)
         && (!('title' in request.resource.data) || request.resource.data.title in ['RA', 'PhD Student', 'Post-Doc', 'Lab Manager', 'PI'])
         && (!('emails' in request.resource.data) || (request.resource.data.emails is map
-          && request.resource.data.emails.keys().hasOnly(['requests', 'updates', 'bookings', 'cancellations', 'scanReminders', 'celebrations', 'missingSchedules', 'websiteUpdates'])));
+          && request.resource.data.emails.keys().hasOnly(emailKinds())));
+      // The PI turns Lab Management Mode, and its emails, on and off for themself.
+      allow update: if memberEmail == email() && isMember() && resource.data.role == 'pi'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['labManagement', 'emails'])
+        && (!('labManagement' in request.resource.data) || request.resource.data.labManagement is bool)
+        && (!('emails' in request.resource.data) || (request.resource.data.emails is map
+          && request.resource.data.emails.keys().hasOnly(emailKinds())));
       allow delete: if isReviewer() && memberEmail != email();
     }
 
@@ -124,7 +137,7 @@ service cloud.firestore {
       allow create: if memberEmail == email() && isMember()
         && request.resource.data.keys().hasOnly(['name', 'title', 'phone', 'lastName'])
         && request.resource.data.name == get(memberPath()).data.name
-        && request.resource.data.title == get(memberPath()).data.get('title', defaultTitle(get(memberPath()).data))
+        && request.resource.data.title == titleFor(get(memberPath()).data)
         && validDirectoryOwn(request.resource.data);
       allow update: if memberEmail == email() && isMember()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phone', 'lastName'])
@@ -134,7 +147,7 @@ service cloud.firestore {
 
     // A PI's phone number lives here instead of in the directory, so RAs can't see it.
     match /directoryPrivate/{memberEmail} {
-      allow read: if (isMember() && get(memberPath()).data.role in ['grad', 'reviewer']) || (verified() && memberEmail == email());
+      allow read: if (isMember() && get(memberPath()).data.role in ['grad', 'reviewer', 'pi']) || (verified() && memberEmail == email());
       allow create, update: if (isReviewer() || (memberEmail == email() && isMember()))
         && request.resource.data.keys().hasOnly(['phone'])
         && request.resource.data.phone is string && request.resource.data.phone.size() <= 30;
@@ -185,12 +198,14 @@ service cloud.firestore {
       allow delete: if owns(resource.data) || isReviewer();
     }
 
-    // A Grad Student/Post-Doc's change leaves a notice; the Apps Script emails reviewers about it and deletes it.
+    // A PhD Student/Post-Doc's change leaves a notice, and so does the PI turning Lab Management Mode on or off; the
+    // Apps Script emails the lab managers about it and deletes it.
     match /notices/{id} {
       allow read, delete: if isReviewer();
-      allow create: if owns(request.resource.data) && isGrad()
+      allow create: if owns(request.resource.data) && (isGrad() || get(memberPath()).data.role == 'pi')
         && request.resource.data.keys().hasOnly(['ownerEmail', 'kind', 'summary', 'createdAt'])
-        && request.resource.data.kind in ['change', 'timeOff']
+        && request.resource.data.kind in ['change', 'timeOff', 'labManagement']
+        && (request.resource.data.kind != 'labManagement' || get(memberPath()).data.role == 'pi')
         && request.resource.data.summary is string && request.resource.data.summary.size() <= 600
         && request.resource.data.createdAt is string;
     }

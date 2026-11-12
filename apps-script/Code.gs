@@ -15,7 +15,7 @@
 
 const CONFIG = {
   projectId: "lab-schedules",
-  siteUrl: "https://dbelkind.github.io/lab-schedules/",
+  siteUrl: "https://dbelkind.github.io/lcl_portal/",
   visitsCalendarName: "LCL Visits",
   confirmedCalendarName: "LCL Confirmed Visits",
   celebrationsCalendarName: "LCL Birthdays & Graduations",
@@ -53,7 +53,7 @@ const RULE_NAMES = [
   "appointmentsOn", "evaluateVisitSlot", "evaluateManagers", "managerCandidates", "normalizeSkills", "isOffHours",
   "SLOT_TITLES", "staffingState", "personLabel", "visitKey", "visitWindow", "unusualTimes", "visitPartsLabel",
   "defaultVisitsThrough", "assignmentLines", "checkAssignment", "BOOKING_STARTS", "clockTime", "wantsEmail", "SEE_TIME",
-  "staffRoles", "bookingEmail", "birthdayMonthDay", "visitStatus",
+  "staffRoles", "bookingEmail", "birthdayMonthDay", "visitStatus", "shortenedScan", "SHORTENED_SCAN", "actsAsLabManager",
 ];
 // Older trigger names are listed too, so running setUp again clears them away.
 const TRIGGERS = ["syncStaffing", "hourlySync", "checkRequests", "frequentChecks", "dailyVisits"];
@@ -88,7 +88,7 @@ function loadSite() {
     holidays: staff.holidays,
     appointments: listCollection("appointments"),
     data: {
-      members: members.map((doc) => ({ email: doc.id, name: doc.name, role: doc.role, skills: rules.normalizeSkills(doc.skills) })),
+      members: members.map((doc) => ({ email: doc.id, name: doc.name, role: doc.role, labManagement: doc.labManagement === true, skills: rules.normalizeSkills(doc.skills) })),
       availability: listCollection("availability"),
       timeOff: listCollection("timeOff"),
       semesters: academic.semesters,
@@ -304,7 +304,8 @@ function choiceMessageLines(items) {
 // Items are { id, owner, choice }; nobody is emailed about something they did themselves, or that they were left off
 // (see Email choices). `compose` turns a reviewer group's items into { subject, lines }.
 function emailReviewers(rules, members, kind, items, compose) {
-  const reviewers = members.filter((member) => member.role === "reviewer" && rules.wantsEmail(member, kind));
+  // The PI is only included in Lab Management Mode, and only for the kinds they've turned on (see wantsEmail).
+  const reviewers = members.filter((member) => rules.actsAsLabManager(member) && rules.wantsEmail(member, kind));
   const groups = new Map();
   for (const reviewer of reviewers) {
     const theirs = items.filter((item) => item.owner !== reviewer.id && !leftOut(item.choice, reviewer.id));
@@ -382,8 +383,14 @@ function checkRequests() {
   const notified = new Set(JSON.parse(saved));
   const choices = loadEmailChoices();
   const fresh = pending.filter((request) => !notified.has(request.id)).map((request) => ({ ...request, choice: takeChoice(choices, "requests", request.id) }));
+  // The PI turning Lab Management Mode on or off is always told to the lab managers (not the PI), whatever they've
+  // turned off, since it changes who gets their emails.
+  for (const notice of notices.filter((item) => item.kind === "labManagement")) {
+    const managers = members.filter((member) => member.role === "reviewer");
+    if (managers.length) sendEmail({ to: managers.map((member) => member.id).join(","), ...labManagementEmail(notice, nameOf(notice.ownerEmail), managers) });
+  }
   // Requests and saved updates are separate kinds of email, so each reviewer gets just the ones they want.
-  const updateItems = notices.map((notice) => ({ id: `notices/${notice.id}`, owner: notice.ownerEmail, text: notice.summary, choice: takeChoice(choices, "updates", `notices/${notice.id}`) }));
+  const updateItems = notices.filter((notice) => notice.kind !== "labManagement").map((notice) => ({ id: `notices/${notice.id}`, owner: notice.ownerEmail, text: notice.summary, choice: takeChoice(choices, "updates", `notices/${notice.id}`) }));
   const emailed = emailReviewers(rules, members, "requests", fresh, (requests) => requestsEmail(requests, nameOf))
     + emailReviewers(rules, members, "updates", updateItems, (updates) => updatesEmail(updates, nameOf));
   // Requests that were waiting last time and have been decided since: the person who sent them hears how it went.
@@ -406,6 +413,23 @@ function checkRequests() {
   for (const notice of notices) deleteDocument(`notices/${notice.id}`);
   if (fresh.length || notices.length) console.log(`${fresh.length} new request(s) and ${notices.length} update(s); sent ${emailed} email(s).`);
   return { emailed, fresh: fresh.length };
+}
+
+// To the lab managers, when the PI turns Lab Management Mode on or off.
+function labManagementEmail(notice, piName, managers) {
+  const on = notice.summary === "on";
+  return {
+    subject: `Lab schedule: ${piName} turned Lab Management Mode ${on ? "on" : "off"}`,
+    lines: [
+      `Hi ${namesList(managers)},`,
+      "",
+      `${bold(piName)} (PI) turned ${bold(underline(`Lab Management Mode ${on ? "on" : "off"}`))} on the Lifespan Cognition Lab Researcher Portal.`,
+      "",
+      on
+        ? "They can now use the site like a lab manager. They only get the lab management emails they've turned on themselves, and the site points out before anything you do would email them."
+        : "They no longer have lab manager access, and won't get any lab management emails.",
+    ],
+  };
 }
 
 // To the person who sent a request, once a reviewer has decided it.
@@ -454,7 +478,7 @@ function checkCancellations(site = loadSite(), staffing = listCollection("staffi
         booking: appointment.booking || "",
         by: appointment.bookedByName || appointment.bookedBy || "",
         owner: appointment.bookedBy || "",
-        seeTime: rules.unusualTimes(appointment).length > 0,
+        seeTime: rules.unusualTimes(appointment, undefined, staffed.has(key)).length > 0,
       };
     }
   }
@@ -972,10 +996,15 @@ function visitsOn(rules, iso, appointments, holidays, through) {
     .sort((a, b) => rules.visitWindow(a).start - rules.visitWindow(b).start);
 }
 
-// Pass "lab" or "scan" for just that portion's unusual times.
-function unusualLines(rules, appointment, kind) {
-  const notes = rules.unusualTimes(appointment, kind);
-  return notes.length ? [`${rules.SEE_TIME} These aren't the usual times:`, ...notes.map((note) => `• ${note}`), ""] : [];
+// Pass "lab" or "scan" for just that portion's unusual times. 🕒 [SEE TIME] needs the visit to be staffed; a
+// shortened scan is always noted, except for the lab portion.
+function unusualLines(rules, appointment, kind, staffed) {
+  const notes = rules.unusualTimes(appointment, kind, staffed);
+  const short = kind === "lab" ? "" : rules.shortenedScan(appointment);
+  return [
+    ...(notes.length ? [`${rules.SEE_TIME} These aren't the usual times:`, ...notes.map((note) => `• ${note}`), ""] : []),
+    ...(short ? [`${rules.SHORTENED_SCAN}: ${short}.`, ""] : []),
+  ];
 }
 
 
@@ -1030,10 +1059,11 @@ function buildVisitEvents(rules, data, appointments, holidays, today, staffing =
       const tail = [...new Set([...parts.flatMap((part) => reasonsFor(rules, part.result)), ...reasonsFor(rules, managerResult)])];
       if (doc) tail.push(check.issues.length ? "staffing conflict" : "staffed");
       if (visits.length > 1) tail.push(`👥 ${visits.length} participants`);
-      const seeTime = rules.unusualTimes(appointment).length > 0;
+      const seeTime = rules.unusualTimes(appointment, undefined, Boolean(doc)).length > 0;
+      const short = rules.shortenedScan(appointment);
       const partsLabel = rules.visitPartsLabel(appointment);
 
-      const lines = [...unusualLines(rules, appointment), `Whole visit: ${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}${partsLabel ? ` (${partsLabel})` : ""}`];
+      const lines = [...unusualLines(rules, appointment, undefined, Boolean(doc)), `Whole visit: ${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}${partsLabel ? ` (${partsLabel})` : ""}`];
       if (booking) lines.push(`Booking: ${BOOKING_TITLES[booking]}${appointment.bookedByName ? ` (${appointment.bookedByName})` : ""}${appointment.requestedStart && status === "booked" ? `, asked to start at ${emailTime(appointment.requestedStart)}` : ""}`);
       if (visits.length > 1) lines.push(`👥 ${visits.length} participants are scheduled this day.`);
       for (const part of parts) lines.push("", ...partLines(rules, iso, appointment, part.kind, part.result));
@@ -1047,7 +1077,7 @@ function buildVisitEvents(rules, data, appointments, holidays, today, staffing =
       lines.push("", `Staff or change this visit: ${CONFIG.siteUrl}#visit=${key}`);
       events.push({
         key: `${key}:visit`,
-        title: `${TITLE_MARKS[state]} ${seeTime ? `${rules.SEE_TIME} ` : ""}${booking ? `${BOOKING_TITLES[booking]}: ` : ""}Participant Visit${visits.length > 1 ? ` ${index + 1}` : ""}${partsLabel ? ` (${partsLabel})` : ""}${tail.length ? ` · ${tail.join(", ")}` : ""}`,
+        title: `${TITLE_MARKS[state]} ${seeTime ? `${rules.SEE_TIME} ` : ""}${short ? `${rules.SHORTENED_SCAN} ` : ""}${booking ? `${BOOKING_TITLES[booking]}: ` : ""}Participant Visit${visits.length > 1 ? ` ${index + 1}` : ""}${partsLabel ? ` (${partsLabel})` : ""}${tail.length ? ` · ${tail.join(", ")}` : ""}`,
         description: lines.join("\n"),
         start: dateAtMinutes(iso, window.start),
         end: dateAtMinutes(iso, window.end),
@@ -1090,7 +1120,8 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
       appointment.lab ? `Lab portion: ${emailTime(appointment.lab.start)} – ${emailTime(appointment.lab.end)}` : "",
       appointment.scan ? `Scan: ${emailTime(appointment.scan.start)} – ${emailTime(appointment.scan.end)}` : "",
     ].filter(Boolean);
-    const prefixFor = (part) => (rules.unusualTimes(appointment, part).length ? `${rules.SEE_TIME} ` : "");
+    const staffed = staffing.some((item) => item.visitKey === doc.visitKey);
+    const prefixFor = (part) => `${rules.unusualTimes(appointment, part, staffed).length ? `${rules.SEE_TIME} ` : ""}${part === "scan" && rules.shortenedScan(appointment) ? `${rules.SHORTENED_SCAN} ` : ""}`;
 
     const visitPeople = [...new Set([lab.dryLab, lab.phlebotomy, lab.wetLab, ...(doc.managers || [])].filter(Boolean))];
     const unstaffed = ["Not staffed yet."];
@@ -1099,7 +1130,7 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
         key: `${doc.visitKey}:visit`,
         title: `${prefixFor(visitPart)}Participant Visit${number}`,
         description: [
-          ...unusualLines(rules, appointment, visitPart),
+          ...unusualLines(rules, appointment, visitPart, staffed),
           `Whole visit: ${range(window.start, window.end)}`,
           ...parts,
           "",
@@ -1123,7 +1154,7 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
         key: `${doc.visitKey}:scan`,
         title: `${prefixFor("scan")}Participant Visit - Scan${number}`,
         description: [
-          ...unusualLines(rules, appointment, "scan"),
+          ...unusualLines(rules, appointment, "scan", staffed),
           `Scan: ${emailTime(appointment.scan.start)} – ${emailTime(appointment.scan.end)}`,
           `Whole visit: ${range(window.start, window.end)}`,
           "",
@@ -1176,16 +1207,20 @@ function staffSnapshot(rules, appointments, holidays, staffing, today) {
       (parts[role.email] = parts[role.email] || new Set()).add(role.part);
     }
     // Each person is only pointed to unusual times in the portion they work; lab managers see both.
+    // A shortened scan is pointed out to whoever's on the scan, and to lab managers.
     const seeTime = {};
+    const shortened = {};
     for (const [email, theirs] of Object.entries(parts)) {
-      seeTime[email] = theirs.has("visit") ? rules.unusualTimes(appointment)
-        : [...new Set(["lab", "scan"].filter((part) => theirs.has(part)).flatMap((part) => rules.unusualTimes(appointment, part)))];
+      seeTime[email] = theirs.has("visit") ? rules.unusualTimes(appointment, undefined, true)
+        : [...new Set(["lab", "scan"].filter((part) => theirs.has(part)).flatMap((part) => rules.unusualTimes(appointment, part, true)))];
+      if (theirs.has("visit") || theirs.has("scan")) shortened[email] = rules.shortenedScan(appointment);
     }
     snapshot[doc.visitKey] = {
       date: doc.date,
       visit: `${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}`,
       participants: visitsOn(rules, doc.date, appointments, holidays).length,
       seeTime,
+      shortened,
       people,
     };
   }
@@ -1202,9 +1237,10 @@ function staffChanges(before, after, todayIso, stillScheduled) {
     for (const [email, roles] of Object.entries(visit.people)) {
       const was = old && old.people[email];
       const seeTime = (visit.seeTime && visit.seeTime[email]) || [];
+      const shortened = (visit.shortened && visit.shortened[email]) || "";
       // Only someone's own roles and times count: a moved scan doesn't email the lab staff.
-      if (!was) add(email, { type: "assigned", key, visit, roles, seeTime });
-      else if (was.join("|") !== roles.join("|") || old.date !== visit.date) add(email, { type: "changed", key, visit, roles, was, oldVisit: old, seeTime });
+      if (!was) add(email, { type: "assigned", key, visit, roles, seeTime, shortened });
+      else if (was.join("|") !== roles.join("|") || old.date !== visit.date) add(email, { type: "changed", key, visit, roles, was, oldVisit: old, seeTime, shortened });
     }
     for (const [email, roles] of Object.entries((old && old.people) || {})) {
       if (!visit.people[email]) add(email, { type: "removed", key, visit: old, roles });
@@ -1248,13 +1284,15 @@ function staffEmail(rules, name, changes) {
     if (current && (change.seeTime || []).length) {
       lines.push(`${highlight(bold(rules.SEE_TIME))} These ${bold("aren't the usual times")}, so please check yours:`, ...change.seeTime.map((note) => `• ${bold(note)}`));
     }
+    if (current && change.shortened) lines.push(`${highlight(bold(rules.SHORTENED_SCAN))} ${change.shortened}.`);
     lines.push("");
   }
   lines.push("Your Google Calendar has been updated to match. Questions? Ask the lab manager.");
   const first = changes[0];
   const seeTime = changes.some((change) => (change.type === "assigned" || change.type === "changed") && (change.seeTime || []).length);
+  const shortened = changes.some((change) => (change.type === "assigned" || change.type === "changed") && change.shortened);
   const subject = changes.length === 1 ? STAFF_SUBJECTS[first.type](emailDateWithDay(first.visit.date)) : `Lab visits: ${changes.length} updates for you`;
-  return { subject: `${subject}${seeTime ? ` ${rules.SEE_TIME}` : ""}`, lines };
+  return { subject: `${subject}${seeTime ? ` ${rules.SEE_TIME}` : ""}${shortened ? ` ${rules.SHORTENED_SCAN}` : ""}`, lines };
 }
 
 // Staff can't turn these off: they carry the times people need. Nothing is sent, or remembered, until
@@ -1351,12 +1389,14 @@ function sendTestEmails() {
   const visit = { date: "2027-01-12", visit: "9:30 AM – 1:30 PM", participants: 2, people: {} };
   const roles = ["Phlebotomy, 9:30 AM–10:00 AM", "Wet Lab, 10:00 AM–12:00 PM"];
   // Lab staff hear about the start time, but not the shorter scan.
-  const seeTime = rules.unusualTimes(late, "lab");
+  const seeTime = rules.unusualTimes(late, "lab", true);
   const staffSample = (changes) => send("staff (once staff emails are switched on)", staffEmail(rules, "Jordan", changes));
   staffSample([{ type: "assigned", visit, roles, seeTime }]);
   staffSample([{ type: "changed", visit, roles: ["Phlebotomy, 9:30 AM–10:00 AM", "Wet Lab, 10:15 AM–12:15 PM"], was: roles, oldVisit: visit, seeTime }]);
   staffSample([{ type: "removed", visit, roles }]);
   staffSample([{ type: "cancelled", visit, roles }]);
+  // A scanner on a scan that starts late and is shortened.
+  staffSample([{ type: "assigned", visit, roles: ["Lead scanner, 11:30 AM–1:00 PM"], seeTime: rules.unusualTimes(late, "scan", true), shortened: rules.shortenedScan(late) }]);
   staffSample([{ type: "assigned", visit, roles, seeTime }, { type: "cancelled", visit: { ...visit, date: "2027-01-14" }, roles: ["Lead scanner, 11:00 AM–1:00 PM"] }]);
 
   const toMember = "RAs and other lab members (once lab member emails are switched on)";
