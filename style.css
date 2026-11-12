@@ -1294,6 +1294,14 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .cancel-choice strong, .cancel-choice .muted { display: block; }
 .cancel-choice .muted { font-size: 13px; }
 
+/* Notes on a visit */
+.note-input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); font: inherit; font-size: 14px; resize: vertical; }
+.note-field { position: relative; }
+.note-field .note-input { min-height: 96px; background: transparent; position: relative; }
+.note-hint { position: absolute; inset: 9px 11px; color: #94a3b8; font-size: 13px; line-height: 1.4; pointer-events: none; }
+.booker-note-copy { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; }
+.booker-note, .staff-note-line { margin: 8px 0; padding: 8px 12px; border-left: 4px solid var(--pink-300); border-radius: var(--radius-small); background: var(--pink-50); font-size: 14px; }
+
 /* The email pop-up */
 .email-dialog { max-width: 520px; }
 .email-group { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-small); }

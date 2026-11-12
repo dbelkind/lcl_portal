@@ -1,5 +1,5 @@
 // Connects the Lifespan Cognition Lab Researcher Portal to Google Calendar and email. It keeps three calendars for lab managers:
-// - "LCL Visits": each participant visit, colored by its booking (gray open, blue booked, orange waiting to be
+// - "LCL Avail Visits": each participant visit, colored by its booking (gray open, blue booked, orange waiting to be
 //   rebooked), with who's available for each part. Updated every 10 minutes, and straight away when the site pings it.
 // - "LCL Confirmed Visits": each staffed visit, with who's doing what. Updated every 10 minutes.
 // - "LCL Birthdays & Graduations": everyone's birthday and expected graduation, for the next year. Updated every hour.
@@ -16,7 +16,7 @@
 const CONFIG = {
   projectId: "lab-schedules",
   siteUrl: "https://dbelkind.github.io/lcl_portal/",
-  visitsCalendarName: "LCL Visits",
+  visitsCalendarName: "LCL Avail Visits",
   confirmedCalendarName: "LCL Confirmed Visits",
   celebrationsCalendarName: "LCL Birthdays & Graduations",
   daysAhead: 60,
@@ -42,7 +42,7 @@ const CONFIG = {
 };
 
 // Google Calendar's event colors, which look the same to everyone the calendar is shared with.
-// LCL Visits is colored by booking: 8 is gray (Graphite) for open, 9 is blue (Blueberry) for booked and waiting to be
+// LCL Avail Visits is colored by booking: 8 is gray (Graphite) for open, 9 is blue (Blueberry) for booked and waiting to be
 // confirmed, 10 is green (Basil) for confirmed, and 6 is orange (Tangerine) for a cancelled booking waiting to be
 // rebooked. Visits from before booking moved to the website keep the calendar's own color.
 const BOOKING_COLORS = { open: "8", booked: "9", confirmed: "10", rebooking: "6" };
@@ -53,7 +53,7 @@ const RULE_NAMES = [
   "appointmentsOn", "evaluateVisitSlot", "evaluateManagers", "managerCandidates", "normalizeSkills", "isOffHours",
   "SLOT_TITLES", "staffingState", "personLabel", "visitKey", "visitWindow", "unusualTimes", "visitPartsLabel",
   "defaultVisitsThrough", "assignmentLines", "checkAssignment", "BOOKING_STARTS", "clockTime", "wantsEmail", "SEE_TIME",
-  "staffRoles", "bookingEmail", "birthdayMonthDay", "visitStatus", "shortenedScan", "SHORTENED_SCAN", "actsAsLabManager",
+  "staffRoles", "bookingEmail", "birthdayMonthDay", "visitStatus", "shortenedScan", "SHORTENED_SCAN", "actsAsLabManager", "labNeeds", "SEE_NOTE",
 ];
 // Older trigger names are listed too, so running setUp again clears them away.
 const TRIGGERS = ["syncStaffing", "hourlySync", "checkRequests", "frequentChecks", "dailyVisits"];
@@ -119,10 +119,24 @@ function syncVisits(site, staffing, today) {
   const calendarId = calendarIdFor("calendarId", CONFIG.visitsCalendarName,
     "Participant visits: gray when open, blue when booked, orange when a booking was cancelled and it's open to rebook. Says who's available for each part. From the Lifespan Cognition Lab Researcher Portal.");
   const changes = writeCalendar(calendarId, wanted, today, CONFIG.daysAhead + 1);
-  console.log(`LCL Visits synced: ${wanted.length} visits, ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
+  console.log(`${CONFIG.visitsCalendarName} synced: ${wanted.length} visits, ${changes.created} added, ${changes.updated} updated, ${changes.deleted} removed.`);
 }
 
-// Every 10 minutes: emails about requests and cancellations, LCL Visits, LCL Confirmed Visits, and staff emails.
+// Run this from the editor to update the three calendars straight away, after a change on the site. It sends no
+// emails: those wait for the usual 10-minute run.
+function syncCalendarsNow() {
+  withLock(() => {
+    const site = loadSite();
+    const staffing = listCollection("staffing");
+    const today = new Date();
+    syncVisits(site, staffing, today);
+    syncConfirmed(site, staffing, today);
+    syncCelebrations(site, listCollection("profiles"), today);
+  });
+  console.log("Calendars updated. No emails were sent.");
+}
+
+// Every 10 minutes: emails about requests and cancellations, LCL Avail Visits, LCL Confirmed Visits, and staff emails.
 // Staff invites and emails wait for this run, so a mistake fixed within a few minutes never reaches anyone.
 function frequentChecks() {
   withLock(() => {
@@ -137,7 +151,7 @@ function frequentChecks() {
   });
 }
 
-// The site pings this web app after a booking, visit or staffing change, so LCL Visits and cancellation emails
+// The site pings this web app after a booking, visit or staffing change, so LCL Avail Visits and cancellation emails
 // don't wait for the 10-minute run. Staff invites and emails still do. It takes no input and changes nothing on the
 // site; anyone with the link could call it, so it runs at most once every few seconds.
 function doPost() {
@@ -1008,6 +1022,12 @@ function unusualLines(rules, appointment, kind, staffed) {
 }
 
 
+// Calendar events say "Phleb" for phlebotomy, to keep them short: "Phleb: Ann", "Mobile Phleb". Sentences that talk
+// about mobile phlebotomy in lowercase are left as they are.
+function shortPhleb(text) {
+  return text.replace(/Mobile phlebotomy/g, "Mobile Phleb").replace(/Phlebotomy/g, "Phleb");
+}
+
 function partLines(rules, iso, appointment, kind, result) {
   const state = rules.staffingState(result);
   const slot = appointment[kind];
@@ -1063,7 +1083,9 @@ function buildVisitEvents(rules, data, appointments, holidays, today, staffing =
       const short = rules.shortenedScan(appointment);
       const partsLabel = rules.visitPartsLabel(appointment);
 
-      const lines = [...unusualLines(rules, appointment, undefined, Boolean(doc)), `Whole visit: ${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}${partsLabel ? ` (${partsLabel})` : ""}`];
+      // Any notes come first: the booker's note to the lab managers, and the notes for the staff.
+      const notes = [["Note from the booker", appointment.bookerNote], ["Note for the lab staff", appointment.labNote], ["Note for the scan staff", appointment.scanNote]].filter(([, text]) => text);
+      const lines = [...notes.flatMap(([label, text]) => [`*NOTE (${label.replace(/^Note /, "")}): ${text}`]), ...(notes.length ? [""] : []), ...unusualLines(rules, appointment, undefined, Boolean(doc)), `Whole visit: ${rules.clockTime(window.start)} – ${rules.clockTime(window.end)}${partsLabel ? ` (${partsLabel})` : ""}`];
       if (booking) lines.push(`Booking: ${BOOKING_TITLES[booking]}${appointment.bookedByName ? ` (${appointment.bookedByName})` : ""}${appointment.requestedStart && status === "booked" ? `, asked to start at ${emailTime(appointment.requestedStart)}` : ""}`);
       if (visits.length > 1) lines.push(`👥 ${visits.length} participants are scheduled this day.`);
       for (const part of parts) lines.push("", ...partLines(rules, iso, appointment, part.kind, part.result));
@@ -1077,8 +1099,8 @@ function buildVisitEvents(rules, data, appointments, holidays, today, staffing =
       lines.push("", `Staff or change this visit: ${CONFIG.siteUrl}#visit=${key}`);
       events.push({
         key: `${key}:visit`,
-        title: `${TITLE_MARKS[state]} ${seeTime ? `${rules.SEE_TIME} ` : ""}${short ? `${rules.SHORTENED_SCAN} ` : ""}${booking ? `${BOOKING_TITLES[booking]}: ` : ""}Participant Visit${visits.length > 1 ? ` ${index + 1}` : ""}${partsLabel ? ` (${partsLabel})` : ""}${tail.length ? ` · ${tail.join(", ")}` : ""}`,
-        description: lines.join("\n"),
+        title: `${TITLE_MARKS[state]}${doc && check.issues.length ? " ⚠️" : ""} ${notes.length ? `${rules.SEE_NOTE} ` : ""}${seeTime ? `${rules.SEE_TIME} ` : ""}${short ? `${rules.SHORTENED_SCAN} ` : ""}${booking ? `${BOOKING_TITLES[booking]}: ` : ""}Participant Visit${visits.length > 1 ? ` ${index + 1}` : ""}${partsLabel ? ` (${partsLabel})` : ""}${tail.length ? ` · ${tail.join(", ")}` : ""}`,
+        description: shortPhleb(lines.join("\n")),
         start: dateAtMinutes(iso, window.start),
         end: dateAtMinutes(iso, window.end),
         color: booking ? BOOKING_COLORS[booking] : null,
@@ -1107,62 +1129,65 @@ function buildConfirmedEvents(rules, data, appointments, holidays, staffing, tod
     // A cancelled visit isn't listed, so its events are removed.
     if (index === -1) continue;
     const appointment = visits[index];
-    const number = visits.length > 1 ? ` (👥 visit ${index + 1} of ${visits.length} that day)` : "";
-    // The visit event is flagged for the lab portion's times (or the scan's, for a scan-only visit), and the scan
-    // event for the scan's, so a shorter scan doesn't flag the lab staff's invite.
-    const visitPart = appointment.lab ? "lab" : "scan";
+    // Kept short: the title is "Study Visit (names)" for the lab staff or "Scan Reservation (names)" for the scan staff,
+    // each person once, and the description is who does what, without times (the event's own times say when).
+    const many = visits.length > 1 ? [`👥 Visit ${index + 1} of ${visits.length} that day`, ""] : [];
     const window = rules.visitWindow(appointment);
-    const range = (from, to) => `${rules.clockTime(from)} – ${rules.clockTime(to)}`;
-    const assigned = rules.assignmentLines(appointment, doc, nameOf);
     const lab = doc.lab || {};
     const scan = doc.scan || {};
-    const parts = [
-      appointment.lab ? `Lab portion: ${emailTime(appointment.lab.start)} – ${emailTime(appointment.lab.end)}` : "",
-      appointment.scan ? `Scan: ${emailTime(appointment.scan.start)} – ${emailTime(appointment.scan.end)}` : "",
-    ].filter(Boolean);
     const staffed = staffing.some((item) => item.visitKey === doc.visitKey);
-    const prefixFor = (part) => `${rules.unusualTimes(appointment, part, staffed).length ? `${rules.SEE_TIME} ` : ""}${part === "scan" && rules.shortenedScan(appointment) ? `${rules.SHORTENED_SCAN} ` : ""}`;
+    // Flags go first, to draw the eye: 🕒 [SEE TIME] for an unusual start, then ⚠️ [SHORT SCAN] on a shortened scan.
+    // A note for the staff comes first of all, as the title's first flag and the description's first lines.
+    const noteFor = (part) => appointment[part === "lab" ? "labNote" : "scanNote"] || "";
+    const noteLines = (part) => (noteFor(part) ? [`*NOTE: ${noteFor(part)}`, ""] : []);
+    const titleFor = (label, names, part) => [
+      ...(noteFor(part) ? [rules.SEE_NOTE] : []),
+      ...(rules.unusualTimes(appointment, part, staffed).length ? [rules.SEE_TIME] : []),
+      ...(part === "scan" && rules.shortenedScan(appointment) ? [rules.SHORTENED_SCAN] : []),
+      `${label} (${[...new Set(names)].join(", ") || "not staffed yet"})`,
+    ].join(" ");
+    const roleLines = (roles) => {
+      const filled = roles.filter(([, name]) => name);
+      return filled.length ? filled.map(([role, name]) => `${role}: ${name}`) : ["Not staffed yet."];
+    };
 
+    // A scan-only visit has just its scan reservation; its lab manager is invited to that instead.
     const visitPeople = [...new Set([lab.dryLab, lab.phlebotomy, lab.wetLab, ...(doc.managers || [])].filter(Boolean))];
-    const unstaffed = ["Not staffed yet."];
-    if (appointment.lab || visitPeople.length) {
+    if (appointment.lab) {
+      const needs = rules.labNeeds(appointment.lab);
+      const phlebotomist = lab.mobilePhlebotomy ? "Mobile Phleb" : lab.phlebotomy ? nameOf(lab.phlebotomy) : "";
+      const roles = [
+        ...(needs.dryLab ? [["Dry Lab", lab.dryLab ? nameOf(lab.dryLab) : ""]] : []),
+        ...(needs.phlebotomy ? [["Phleb", phlebotomist]] : []),
+        ["Wet Lab", lab.wetLab ? nameOf(lab.wetLab) : ""],
+      ];
       events.push({
         key: `${doc.visitKey}:visit`,
-        title: `${prefixFor(visitPart)}Participant Visit${number}`,
-        description: [
-          ...unusualLines(rules, appointment, visitPart, staffed),
-          `Whole visit: ${range(window.start, window.end)}`,
-          ...parts,
-          "",
-          "Staff:",
-          ...([...assigned.lab, ...assigned.managers].map((line) => `• ${line}`).concat(visitPeople.length ? [] : unstaffed)),
-          "",
-          "Lab staff are only needed for their own times above and don't need to come back after the scan; a lab manager finishes the visit.",
-          ...(appointment.scan ? ["Scanners have a separate invite for the scan."] : []),
-          "",
-          `Staffing on the Lifespan Cognition Lab Researcher Portal: ${CONFIG.siteUrl}#visit=${doc.visitKey}`,
-        ].join("\n"),
+        title: titleFor("Study Visit", roles.map(([, name]) => name).filter(Boolean), "lab"),
+        description: [...noteLines("lab"), ...unusualLines(rules, appointment, "lab", staffed), ...many, ...roleLines(roles)].join("\n"),
         start: dateAtMinutes(doc.date, window.start),
         end: dateAtMinutes(doc.date, window.end),
         attendees: visitPeople,
       });
     }
 
-    const scanPeople = [...new Set([scan.lead, scan.support, scan.wanding].filter(Boolean))];
+    const scanPeople = [...new Set([scan.lead, scan.support, scan.wanding, ...(appointment.lab ? [] : doc.managers || [])].filter(Boolean))];
     if (appointment.scan) {
+      const wandingNeeded = appointment.scan.wandingRequired !== false;
+      const roles = [
+        ["Lead scanner", scan.lead ? nameOf(scan.lead) : ""],
+        ["Second scanner", scan.support ? nameOf(scan.support) : ""],
+        ...(wandingNeeded ? [["Wanding/Taping", scan.wanding ? nameOf(scan.wanding) : ""]] : []),
+      ];
       events.push({
         key: `${doc.visitKey}:scan`,
-        title: `${prefixFor("scan")}Participant Visit - Scan${number}`,
+        title: titleFor("Scan Reservation", roles.map(([, name]) => name).filter(Boolean), "scan"),
         description: [
+          ...noteLines("scan"),
           ...unusualLines(rules, appointment, "scan", staffed),
-          `Scan: ${emailTime(appointment.scan.start)} – ${emailTime(appointment.scan.end)}`,
-          `Whole visit: ${range(window.start, window.end)}`,
-          "",
-          "Staff:",
-          ...(scanPeople.length ? assigned.scan.map((line) => `• ${line}`) : unstaffed),
-          ...(appointment.scan.wandingRequired === false ? ["", "Wanding/taping isn't required for this visit."] : []),
-          "",
-          `Lifespan Cognition Lab Researcher Portal: ${CONFIG.siteUrl}`,
+          ...many,
+          ...roleLines(roles),
+          ...(wandingNeeded ? [] : ["Wanding/taping isn't needed for this visit."]),
         ].join("\n"),
         start: dateAt(doc.date, appointment.scan.start),
         end: dateAt(doc.date, appointment.scan.end),

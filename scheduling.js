@@ -51,6 +51,9 @@ function actsAsLabManager(member) {
   return Boolean(member) && (member.role === "reviewer" || (member.role === "pi" && member.labManagement === true));
 }
 
+// Marks a calendar event that has a note for its staff, which is its first line.
+const SEE_NOTE = "📝 [SEE NOTE]";
+
 // Marks a visit whose times aren't the usual ones, wherever it's shown.
 const SEE_TIME = "🕒 [SEE TIME]";
 
@@ -190,7 +193,7 @@ function unusualTimes(appointment, only, staffed) {
 }
 
 // A scan booked for less than the usual 2 hours (often 1.5) gets its own warning, wherever the scan is shown.
-const SHORTENED_SCAN = "⚠️ SHORTENED SCAN TIME";
+const SHORTENED_SCAN = "⚠️ [SHORT SCAN]";
 
 function shortenedScan(appointment) {
   if (!appointment.scan) return "";
@@ -851,7 +854,7 @@ function checkAssignment(iso, appointment, assignment, data) {
 // line for them to fill in. `when` is the visit's day and times, `parts` its lab and scan times, `requestedStart`
 // any other start time they asked for, and `link` the visit on the site. The site drafts it; the Apps Script sends a
 // sample in its test emails.
-function bookingEmail({ when, parts, requestedStart, link }) {
+function bookingEmail({ when, parts, requestedStart, link, note }) {
   return {
     subject: `Booked: ${when}${requestedStart ? " (start time change requested)" : ""}`,
     body: [
@@ -860,6 +863,7 @@ function bookingEmail({ when, parts, requestedStart, link }) {
       `Visit: ${when}`,
       parts,
       ...(requestedStart ? [`Requested start time: ${requestedStart} (needs your approval)`] : []),
+      ...(note ? [`Note: ${note}`] : []),
       "",
       "Screener ID: ",
       "",

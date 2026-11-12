@@ -685,8 +685,9 @@ function unusualNotice(appointment, kind) {
 
 // Booking (or cancelling one) always leaves the visit for a reviewer to confirm. `requestedStart` is a start time
 // the booker asked for instead of the slot's, or "".
-function bookingFields(status, requestedStart = "") {
-  return { booking: status, bookedBy: me.email, bookedByName: me.name, bookedAt: new Date().toISOString(), requestedStart, confirmed: false };
+// A booker's note goes with their booking, and is cleared when a booking is cancelled.
+function bookingFields(status, requestedStart = "", bookerNote = "") {
+  return { booking: status, bookedBy: me.email, bookedByName: me.name, bookedAt: new Date().toISOString(), requestedStart, confirmed: false, bookerNote };
 }
 
 function staffingFor(appointment) {
@@ -1394,6 +1395,9 @@ function appointmentData(appointment, changes) {
       : {}),
     ...(merged.requestedStart ? { requestedStart: merged.requestedStart } : {}),
     ...(merged.confirmed ? { confirmed: true, confirmedBy: merged.confirmedBy, confirmedAt: merged.confirmedAt } : {}),
+    ...(merged.bookerNote ? { bookerNote: merged.bookerNote } : {}),
+    ...(merged.labNote ? { labNote: merged.labNote } : {}),
+    ...(merged.scanNote ? { scanNote: merged.scanNote } : {}),
   };
 }
 
@@ -1401,8 +1405,8 @@ function shiftClock(time, minutes) {
   return time ? minutesToTime(toMinutes(time) + minutes) : time;
 }
 
-async function setBooking(appointment, status, requestedStart = "") {
-  await Store.bookVisit(appointment, bookingFields(status, requestedStart));
+async function setBooking(appointment, status, requestedStart = "", bookerNote = "") {
+  await Store.bookVisit(appointment, bookingFields(status, requestedStart, bookerNote));
   pingSync();
   await refresh();
 }
@@ -1709,6 +1713,9 @@ function openStaffingDialog(iso, appointment) {
     lab: appointment.lab ? { ...(saved && saved.lab ? saved.lab : labFromOption(best.lab)) } : null,
     scan: appointment.scan ? { ...(saved && saved.scan ? saved.scan : scanFromOption(best.scan)) } : null,
     managers: saved ? [...(saved.managers || [])] : [...suggested.managers],
+    wandingRequired: !appointment.scan || appointment.scan.wandingRequired !== false,
+    labNote: appointment.labNote || "",
+    scanNote: appointment.scanNote || "",
   };
   if (draft.lab && !draft.lab.phlebotomyAt && needs.phlebotomy) draft.lab.phlebotomyAt = appointment.lab.start;
   if (draft.lab && !draft.lab.wetLabStart) draft.lab.wetLabStart = minutesToTime(wetLabAnchor(appointment.lab, toMinutes(draft.lab.phlebotomyAt || appointment.lab.start)) + PHLEBOTOMY_MINUTES);
@@ -1877,8 +1884,20 @@ function openStaffingDialog(iso, appointment) {
         picker("lead", draft.scan.lead, (email) => { draft.scan.lead = email; }),
         picker("support", draft.scan.support, (email) => { draft.scan.support = email; }),
       );
-      if (appointment.scan.wandingRequired !== false) grid.append(picker("wanding", draft.scan.wanding, (email) => { draft.scan.wanding = email; }));
+      if (draft.wandingRequired) grid.append(picker("wanding", draft.scan.wanding, (email) => { draft.scan.wanding = email; }));
       section.append(grid);
+      // Unticking means no one needs to be staffed for wanding/taping.
+      const wanding = el("input");
+      wanding.type = "checkbox";
+      wanding.checked = draft.wandingRequired;
+      wanding.addEventListener("change", () => {
+        draft.wandingRequired = wanding.checked;
+        if (!wanding.checked) draft.scan.wanding = null;
+        render();
+      });
+      const wandingLabel = el("label", "check-field");
+      wandingLabel.append(wanding, "🧲 Wanding/taping needed");
+      section.append(wandingLabel);
       body.push(section);
     }
     const managerSection = el("div", "staff-section");
@@ -1887,7 +1906,22 @@ function openStaffingDialog(iso, appointment) {
     managerSection.append(picker("managers", draft.managers, (emails) => { draft.managers = emails; }));
     body.push(managerSection);
 
-    const check = checkAssignment(iso, appointment, draft, data);
+    // Notes go at the top of the staff's calendar events. They're kept as they're typed, so redrawing keeps them.
+    const notesSection = el("div", "staff-section");
+    notesSection.append(el("h3", "", "Notes for Staff"), ...bookerNoteLine(appointment, (key) => {
+      draft[key] = draft[key].trim() ? `${draft[key].trim()} ${appointment.bookerNote}` : appointment.bookerNote;
+      render();
+    }));
+    for (const [part, key, label] of [["lab", "labNote", "Note for the lab staff"], ["scan", "scanNote", "Note for the scan staff"]]) {
+      if (!appointment[part]) continue;
+      const box = noteBox(draft[key], "Optional. Shown first on their calendar event.");
+      box.addEventListener("input", () => { draft[key] = box.value; });
+      notesSection.append(labeled(label, box));
+    }
+    body.push(notesSection);
+
+    const staffedVisit = appointment.scan ? { ...appointment, scan: { ...appointment.scan, wandingRequired: draft.wandingRequired } } : appointment;
+    const check = checkAssignment(iso, staffedVisit, draft, data);
     if (check.issues.length) {
       const issues = el("div", "slot-issues");
       issues.append(el("strong", "", "This staffing has problems:"));
@@ -1905,12 +1939,16 @@ function openStaffingDialog(iso, appointment) {
           date: iso,
           visitKey: key,
           lab: draft.lab,
-          scan: draft.scan,
+          scan: draft.scan && { ...draft.scan, wanding: draft.wandingRequired ? draft.scan.wanding : null },
           managers: draft.managers.filter(Boolean),
           approvedBy: me.email,
           approvedAt: new Date().toISOString(),
         };
-        await confirmEmails("Approve Staffing", [staffGroup(iso, key, { appointment, doc: saved }, { appointment, doc })]);
+        await confirmEmails("Approve Staffing", [staffGroup(iso, key, { appointment, doc: saved }, { appointment: staffedVisit, doc })]);
+        // The visit keeps whether wanding/taping is needed, and the notes for its staff.
+        const visitChanges = { labNote: draft.labNote.trim(), scanNote: draft.scanNote.trim(), ...(appointment.scan ? { scan: staffedVisit.scan } : {}) };
+        const before = { labNote: appointment.labNote || "", scanNote: appointment.scanNote || "", ...(appointment.scan ? { scan: appointment.scan } : {}) };
+        if (JSON.stringify(visitChanges) !== JSON.stringify(before)) await Store.saveAppointment(appointment, appointmentData(appointment, visitChanges));
         await Store.saveStaffing(key, doc);
         pingSync();
         await refresh();
@@ -2795,11 +2833,8 @@ function visitHeading(iso, appointment) {
 function visitTimesEditor(appointment, startTime) {
   const node = el("div", "visit-times");
   const preview = el("p", "muted visit-times-preview");
-  const wanding = el("input");
-  wanding.type = "checkbox";
-  wanding.checked = !appointment.scan || appointment.scan.wandingRequired !== false;
-  const wandingLabel = el("label", "check-field");
-  wandingLabel.append(wanding, "Wanding/taping required");
+  // Whether wanding/taping is needed is chosen while staffing, so changing the times keeps it as it is.
+  const wandingRequired = !appointment.scan || appointment.scan.wandingRequired !== false;
   const full = Boolean(appointment.lab && appointment.scan);
   const window = visitWindow(appointment);
   const fields = full
@@ -2810,10 +2845,10 @@ function visitTimesEditor(appointment, startTime) {
     if (!Object.values(values).every(validTime)) throw new Error("Please fill in every time.");
     if (full) {
       if (values.scanEnd <= values.scanStart) throw new Error("The scan has to end after it starts.");
-      return visitPartsFrom(values.start, values.scanStart, values.scanEnd, wanding.checked);
+      return visitPartsFrom(values.start, values.scanStart, values.scanEnd, wandingRequired);
     }
     if (values.end <= values.start) throw new Error("The end time must be after the start time.");
-    return appointment.lab ? { lab: { ...appointment.lab, start: values.start, end: values.end }, scan: null } : { lab: null, scan: { start: values.start, end: values.end, wandingRequired: wanding.checked } };
+    return appointment.lab ? { lab: { ...appointment.lab, start: values.start, end: values.end }, scan: null } : { lab: null, scan: { start: values.start, end: values.end, wandingRequired } };
   };
   const update = () => {
     try {
@@ -2827,7 +2862,7 @@ function visitTimesEditor(appointment, startTime) {
   if (full) row.append(labeled("Visit starts", fields.start), labeled("Scan starts", fields.scanStart), labeled("Scan ends", fields.scanEnd));
   else row.append(labeled("Starts", fields.start), labeled("Ends", fields.end));
   for (const input of Object.values(fields)) input.addEventListener("change", update);
-  node.append(row, preview, ...(appointment.scan ? [wandingLabel] : []));
+  node.append(row, preview);
   update();
   return { node, read };
 }
@@ -2873,6 +2908,56 @@ function draggedParts(appointment, part, item, start, end) {
   return parts;
 }
 
+// --- Notes on a visit ---
+// Lab managers can leave a note for the lab staff and one for the scan staff, which go at the top of those calendar
+// events. A booker can leave a note for the lab managers, which mustn't identify the participant.
+
+const NOTE_LENGTH = 500;
+
+function noteBox(value, placeholder) {
+  const box = el("textarea", "note-input");
+  box.maxLength = NOTE_LENGTH;
+  box.rows = 2;
+  box.value = value || "";
+  if (placeholder) box.placeholder = placeholder;
+  return box;
+}
+
+// The lab and scan notes for whichever parts a visit has. `read()` gives { labNote, scanNote }.
+function staffNotes(appointment) {
+  const node = el("div", "staff-notes-fields");
+  const boxes = {};
+  for (const [part, key, label] of [["lab", "labNote", "Note for the lab staff"], ["scan", "scanNote", "Note for the scan staff"]]) {
+    if (!appointment[part]) continue;
+    boxes[key] = noteBox(appointment[key], "Optional. Shown first on their calendar event.");
+    node.append(labeled(label, boxes[key]));
+  }
+  const copy = (key, text) => {
+    const box = boxes[key];
+    box.value = box.value.trim() ? `${box.value.trim()} ${text}` : text;
+  };
+  return { node, read: () => Object.fromEntries(Object.entries(boxes).map(([key, box]) => [key, box.value.trim()])), copy };
+}
+
+// The booker's note, with buttons to copy it into the lab or scan staff's note when `onCopy(key)` is given.
+function bookerNoteLine(appointment, onCopy) {
+  if (!appointment.bookerNote) return [];
+  const line = el("div", "booker-note");
+  line.append(el("strong", "", `Note from ${appointment.bookedByName || "the booker"}: `), appointment.bookerNote);
+  if (onCopy) {
+    const buttons = el("div", "booker-note-copy");
+    for (const [part, key, label] of [["lab", "labNote", "Copy to lab staff note"], ["scan", "scanNote", "Copy to scan staff note"]]) {
+      if (!appointment[part]) continue;
+      const button = el("button", "link-button", label);
+      button.type = "button";
+      button.addEventListener("click", () => onCopy(key));
+      buttons.append(button);
+    }
+    line.append(buttons);
+  }
+  return [line];
+}
+
 // A visit's lab portion and scan, both moved by `minutes`.
 function shiftedParts(appointment, minutes) {
   const shift = (part) => (part ? { ...part, start: shiftClock(part.start, minutes), end: shiftClock(part.end, minutes) } : null);
@@ -2911,10 +2996,12 @@ function openConfirmDialog(iso, appointment) {
     body.push(el("p", "notice", `${appointment.bookedByName || "The booker"} asked to start at ${formatTime(appointment.requestedStart)} instead. It's filled in below: keep it to approve, or change it.`));
   }
   body.push(el("h3", "", "Visit and Scan Times"), times.node, el("p", "muted", "Record the scan time you booked. The lab portion runs 2 hours from the start, or until the scan if that's sooner."));
+  const notes = staffNotes(appointment);
+  body.push(el("h3", "", "Notes for Staff"), ...bookerNoteLine(appointment, (key) => notes.copy(key, appointment.bookerNote)), notes.node);
   body.push(visitAvailability(iso, appointment));
   openDialog("Confirm Booking", body, [
     dialogButton("Confirm booking", "primary", async () => {
-      await saveVisitTimes(appointment, times.read(), { confirmed: true, confirmedBy: me.email, confirmedAt: new Date().toISOString(), requestedStart: "" });
+      await saveVisitTimes(appointment, times.read(), { confirmed: true, confirmedBy: me.email, confirmedAt: new Date().toISOString(), requestedStart: "", ...notes.read() });
       openConfirmedReminder(iso, freshVisit(iso, appointment));
       return "";
     }),
@@ -2941,6 +3028,10 @@ function openScheduledDialog(iso, appointment) {
   const body = [...visitHeading(iso, appointment), el("p", "", partsText(appointment))];
   for (const note of timeNotes(appointment)) body.push(el("p", "booking-unusual", note));
   body.push(el("p", "muted", `Booked by ${appointment.bookedByName || appointment.bookedBy || "a reviewer"}${appointment.confirmedBy ? `, confirmed by ${nameFor(appointment.confirmedBy)}` : ""}.`));
+  body.push(...bookerNoteLine(appointment));
+  for (const [key, label] of [["labNote", "Note for the lab staff"], ["scanNote", "Note for the scan staff"]]) {
+    if (appointment[key]) body.push(el("p", "staff-note-line", `${label}: ${appointment[key]}`));
+  }
   body.push(staffingSummary(iso, appointment), visitAvailability(iso, appointment, !doc));
   openDialog("Scheduled Visit", body, [
     switchButton(doc ? "Change staffing" : "Staff this visit", "primary", () => openStaffingDialog(iso, appointment)),
@@ -3014,16 +3105,28 @@ function openBookDialog(iso, appointment) {
   };
   select.append(option("", `As scheduled (${formatTime(start)})`), ...REQUESTABLE_STARTS.filter((time) => time !== start)
     .map((time) => option(time, `Ask for ${formatTime(time)} (needs a lab manager's approval)`)));
+  const note = bookerNoteField();
   openDialog("Book This Slot", [
     ...visitHeading(iso, appointment),
     el("p", "", partsText(appointment)),
     labeled("Start time", select),
+    labeled("Note (optional)", note.node),
     el("p", "notice", "Don't enter participant information here. After you book, an email to the reviewers opens in your own USC email: add the Screener ID and send it."),
   ], [
     dialogButton("Mark booked", "primary", async () => {
       const requested = select.value;
-      await setBooking(appointment, "booked", requested);
-      openEmailDraft(bookingEmailUrl(iso, appointment, requested));
+      const text = note.read();
+      if (text) {
+        const ok = await askToProceed("Check Your Note",
+          "Please confirm your note doesn't include any participant identifiers (name, address, email, phone number, date of birth, etc.) or study ID.", "It doesn't, book it");
+        if (!ok) {
+          const stop = new Error("Nothing was changed. Edit the note, then book again.");
+          stop.calledOff = true;
+          throw stop;
+        }
+      }
+      await setBooking(appointment, "booked", requested, text);
+      openEmailDraft(bookingEmailUrl(iso, appointment, requested, text));
       return requested
         ? `Booked, asking to start at ${formatTime(requested)}. An email to the reviewers has opened: add the Screener ID and send it.`
         : "Booked. An email to the reviewers has opened: add the Screener ID and send it.";
@@ -3032,11 +3135,27 @@ function openBookDialog(iso, appointment) {
   ]);
 }
 
+// A booker's note box. Its hint is shown over the empty box, since a plain placeholder can't be bold or underlined.
+function bookerNoteField() {
+  const node = el("div", "note-field");
+  const box = noteBox("", "");
+  box.setAttribute("aria-label", "Note to lab managers. Do not include any identifiers or study IDs.");
+  const hint = el("div", "note-hint");
+  const warning = el("strong", "");
+  warning.append(el("u", "", "DO NOT INCLUDE ANY IDENTIFIERS OR STUDY IDs"));
+  hint.append("Enter a note to lab managers about this appointment/participant, but ", warning,
+    '. Examples of notes include: "Participant mentioned they have thin veins", "Participant wears soft contacts", etc. Type note here: ...');
+  box.addEventListener("input", () => { hint.hidden = Boolean(box.value); });
+  node.append(hint, box);
+  return { node, read: () => box.value.trim() };
+}
+
 // Bookers: a visit they booked.
 function openMyBookingDialog(iso, appointment) {
   const status = visitStatus(appointment);
   const body = [...visitHeading(iso, appointment), el("p", "", partsText(appointment)), el("p", "", status === "confirmed" ? "Confirmed by a lab manager." : "Booked, waiting for a lab manager to confirm it.")];
   if (status === "booked" && appointment.requestedStart) body.push(el("p", "notice", `You asked to start at ${formatTime(appointment.requestedStart)}. A lab manager will approve or change it.`));
+  body.push(...bookerNoteLine(appointment));
   for (const note of timeNotes(appointment)) body.push(el("p", "booking-unusual", note));
   const actions = [];
   if (status === "booked") actions.push(bookingEmailLink(iso, appointment));
@@ -3081,7 +3200,7 @@ function visitLink(appointment) {
 // The booker's email to the reviewers, sent from their own USC account. The booker types the Screener ID in, so
 // participant information only ever travels by email and goes on the lab's own Google Calendar, never this site.
 // Cancelled bookings aren't emailed this way: the Apps Script emails lab managers about them automatically.
-function bookingEmailUrl(iso, appointment, requestedStart = "") {
+function bookingEmailUrl(iso, appointment, requestedStart = "", bookerNote = appointment.bookerNote || "") {
   // A booker's email goes to the lab managers only, never the PI.
   const to = reviewerContacts.filter((reviewer) => reviewer.role === "reviewer").map((reviewer) => reviewer.email).join(",");
   const { subject, body } = bookingEmail({
@@ -3089,6 +3208,7 @@ function bookingEmailUrl(iso, appointment, requestedStart = "") {
     parts: partsText(appointment),
     requestedStart: requestedStart ? formatTime(requestedStart) : "",
     link: visitLink(appointment),
+    note: bookerNote,
   });
   return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
