@@ -1258,7 +1258,8 @@ function staffEmail(rules, name, changes) {
 }
 
 // Staff can't turn these off: they carry the times people need. Nothing is sent, or remembered, until
-// CONFIG.inviteStaff is on, so turning it on tells everyone about the upcoming visits they're staffing.
+// CONFIG.inviteStaff is on. The first run after that only remembers who's staffing what, so visits set up before staff
+// emails were turned on are never emailed about; only changes from then on are.
 function notifyStaff(site = loadSite(), staffing = listCollection("staffing"), today = new Date()) {
   if (!CONFIG.inviteStaff) return { emailed: 0 };
   const { rules } = site;
@@ -1268,6 +1269,13 @@ function notifyStaff(site = loadSite(), staffing = listCollection("staffing"), t
     if (name.startsWith("staff:")) before[name.slice("staff:".length)] = JSON.parse(value);
   }
   const after = staffSnapshot(rules, site.appointments, site.holidays, staffing, today);
+  if (properties.getProperty("staffEmailsSince") === null) {
+    for (const key of Object.keys(before)) properties.deleteProperty(`staff:${key}`);
+    for (const [key, visit] of Object.entries(after)) properties.setProperty(`staff:${key}`, JSON.stringify(visit));
+    properties.setProperty("staffEmailsSince", isoOf(today));
+    console.log(`Staff emails turned on. The ${Object.keys(after).length} visit(s) already staffed weren't emailed about.`);
+    return { emailed: 0 };
+  }
   const stillScheduled = (key, date) => visitsOn(rules, date, site.appointments, site.holidays).some((visit) => rules.visitKey(visit) === key);
   const changes = staffChanges(before, after, isoOf(today), stillScheduled);
   const nameOf = (email) => (site.members.find((member) => member.id === email) || {}).name || email;

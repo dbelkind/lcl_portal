@@ -500,7 +500,8 @@ function availabilityAllDay(iso) {
   const cell = el("div", "all-day");
   const holiday = staffHolidayOn(iso, staffHolidays);
   if (holiday) cell.append(el("div", "event event-holiday", `Staff holiday: ${holiday.name}`));
-  for (const event of eventsOn(iso)) cell.append(el("div", `event event-${event.kind}`, event.name));
+  // Only staff holidays stop visits, so USC's class holidays and breaks (such as Veterans Day) are shown plainly here.
+  for (const event of eventsOn(iso)) cell.append(el("div", "event event-academic", event.name));
   return cell;
 }
 
