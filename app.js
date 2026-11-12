@@ -3118,7 +3118,7 @@ function openBookDialog(iso, appointment) {
       const text = note.read();
       if (text) {
         const ok = await askToProceed("Check Your Note",
-          "Please confirm your note doesn't include any participant identifiers (name, address, email, phone number, date of birth, etc.) or study ID.", "It doesn't, book it");
+          "Please confirm your note doesn't include any participant identifiers (name, address, email, phone number, date of birth, etc.) or study ID.", "Confirm NO identifiers included; proceed with booking");
         if (!ok) {
           const stop = new Error("Nothing was changed. Edit the note, then book again.");
           stop.calledOff = true;
