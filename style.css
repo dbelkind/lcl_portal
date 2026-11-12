@@ -1232,7 +1232,9 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .team-filters > summary { padding: 8px 14px; cursor: pointer; font-size: 14px; }
 .team-filters-title { font-weight: 700; }
 .team-filters[open] > summary { border-bottom: 1px solid var(--line); }
-.team-filters > .role-filters, .team-filters > .filters { margin: 10px 14px; }
+.team-filters > .role-filters { margin: 10px 14px; }
+.team-people { margin: 0 0 8px; }
+.team-people-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; font-size: 14px; }
 .team-filters > .role-filters { padding: 0; border: 0; background: none; }
 
 /* Availability summaries: one color-coded line per part, which opens to the details */

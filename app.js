@@ -37,7 +37,8 @@ const classFromEl = document.getElementById("term-from");
 const classToEl = document.getElementById("term-to");
 const dialogEl = document.getElementById("event-dialog");
 
-const hidden = new Set();
+// Team Availability shows only the people selected here (by email), and starts with no one selected.
+let teamShown = new Set();
 let selected = startOfDay(new Date());
 let miniYear = selected.getFullYear();
 let miniMonth = selected.getMonth();
@@ -236,27 +237,29 @@ function canEditEntriesOf(email) {
   return email === me.email || isReviewer();
 }
 
+// Team Availability: a chip for everyone, always in view, to pick who's shown. The position and training filters,
+// folded away underneath, select groups of people at once.
 function renderFilters() {
-  // Only people matching the position and training filters get a chip.
-  const chipMembers = isTeamView() ? members.filter(matchesRoleFilter) : members;
-  filtersEl.replaceChildren(...chipMembers.map((member) => {
+  filtersEl.replaceChildren(...members.map((member) => {
     const chip = el("button", "chip");
     chip.type = "button";
     chip.style.setProperty("--member", member.color);
-    chip.setAttribute("aria-pressed", String(!hidden.has(member.name)));
+    chip.setAttribute("aria-pressed", String(teamShown.has(member.email)));
     chip.append(el("span", "dot"), member.name);
     chip.addEventListener("click", () => {
-      if (hidden.has(member.name)) hidden.delete(member.name);
-      else hidden.add(member.name);
-      render();
+      if (teamShown.has(member.email)) teamShown.delete(member.email);
+      else teamShown.add(member.email);
+      renderFilters();
+      renderWeek();
     });
     return chip;
   }));
+  document.getElementById("team-people").hidden = !isTeamView();
   document.getElementById("team-filters").hidden = !isTeamView();
   if (isTeamView()) {
     renderRoleFilters();
-    const shown = chipMembers.filter((member) => !hidden.has(member.name)).length;
-    document.getElementById("team-filters-count").textContent = shown === members.length ? "Showing everyone" : `Showing ${shown} of ${members.length} people`;
+    const shown = members.filter((member) => teamShown.has(member.email)).length;
+    document.getElementById("team-people-count").textContent = shown ? `Showing ${shown} of ${members.length}` : "No one selected yet: pick people to see their times";
   }
   document.getElementById("empty").hidden = !isMineView() || blocks.some((block) => block.ownerEmail === targetEmail());
 }
@@ -336,8 +339,7 @@ function isMineView() {
 // My availability's calendar only shows the person whose times are being entered; Unavailability shows everyone not turned off.
 function showsBlock(block) {
   if (isMineView()) return block.ownerEmail === targetEmail();
-  const member = members.find((item) => item.email === block.ownerEmail);
-  return !hidden.has(block.member) && (!member || matchesRoleFilter(member));
+  return teamShown.has(block.ownerEmail);
 }
 
 // Unavailable Times and Available Times share their filters.
@@ -467,8 +469,7 @@ function filterBox(node, depth) {
       if (pickAll) availabilityRoles.add(leaf.key);
       else availabilityRoles.delete(leaf.key);
     }
-    renderFilters();
-    renderWeek();
+    selectByRoleFilter();
   });
   const count = members.filter((member) => leaves.some((leaf) => leafMatches(leaf, member))).length;
   label.append(box, el("span", "", node.label), el("span", "role-count", String(count)));
@@ -482,19 +483,25 @@ function filterBox(node, depth) {
   return item;
 }
 
+// The people selected become everyone matching the ticked groups (no one, with nothing ticked). People can still be
+// added or taken off one at a time after.
+function selectByRoleFilter() {
+  teamShown = new Set(availabilityRoles.size ? members.filter(matchesRoleFilter).map((member) => member.email) : []);
+  renderFilters();
+  renderWeek();
+}
+
 // If drawing the filter ever fails, it says so on the page instead of quietly leaving groups out.
 function renderRoleFilters() {
   const panel = document.getElementById("role-filters");
   const head = el("div", "role-filters-head");
-  const shown = members.filter(matchesRoleFilter).length;
-  head.append(el("strong", "", "Filter by Position and Training"), el("span", "muted", availabilityRoles.size ? `Showing ${shown} of ${members.length} people` : "Showing everyone"));
+  head.append(el("span", "muted", "Ticking a group selects everyone in it."));
   if (availabilityRoles.size) {
     const clear = el("button", "link-button", "Clear");
     clear.type = "button";
     clear.addEventListener("click", () => {
       availabilityRoles = new Set();
-      renderFilters();
-      renderWeek();
+      selectByRoleFilter();
     });
     head.append(clear);
   }
@@ -521,7 +528,7 @@ function availabilityAllDay(iso) {
 function renderAvailabilityColumn(column, iso, colorOf) {
   const from = weekLayout.firstHour * 60;
   const to = weekLayout.lastHour * 60;
-  const people = candidatesOn(iso, staffingData(), (member) => !hidden.has(member.name) && matchesRoleFilter(member));
+  const people = candidatesOn(iso, staffingData(), (member) => teamShown.has(member.email));
   const items = people.flatMap((person) => freeIntervals(person, from, to)
     .filter(([start, end]) => end - start >= SNAP_MINUTES)
     .map(([start, end]) => ({ start: minutesToTime(start), end: minutesToTime(end), person })));
@@ -2737,7 +2744,7 @@ function renderAppointmentsColumn(column, iso) {
       chips.append(el("span", `slot-chip ${doc ? "chip-staffed" : "chip-open"}`, doc ? "Staffed" : "Not staffed yet"));
     }
     if (chips.children.length) node.append(chips);
-    node.title = [heading.textContent, ...(short ? [time.textContent] : []), ...chips.children.map((chip) => chip.textContent)].join(" · ");
+    node.title = [heading.textContent, ...(short ? [time.textContent] : []), ...[...chips.children].map((chip) => chip.textContent)].join(" · ");
     // Lab managers can drag any block to move it, or drag its top or bottom edge to change when it starts or ends.
     if (isReviewer()) {
       makeInteractive(node, {
@@ -3216,7 +3223,11 @@ function mountCalendar(homeId) {
 }
 
 // Administrative Schedules: Team availability (unavailable or available times), Staffing, or the Availability Checker.
-function setAdminView(view) {
+function setAdminView(view, { keepSelection = false } = {}) {
+  if (view === "team" && !keepSelection) {
+    teamShown = new Set();
+    availabilityRoles = new Set();
+  }
   adminView = view;
   for (const button of document.querySelectorAll("[data-admin]")) button.setAttribute("aria-selected", String(button.dataset.admin === view));
   document.getElementById("team-toggle").hidden = view !== "team";
@@ -4724,7 +4735,7 @@ async function handleAuthChange(user) {
   actingFor = null;
   shownMembers = new Set();
   memberPickerOpen = false;
-  hidden.clear();
+  teamShown = new Set();
   calendarView = "appointments";
   adminView = "staffing";
   teamView = "unavailability";
@@ -4840,7 +4851,7 @@ function wireUpEvents() {
   for (const button of document.querySelectorAll("[data-team]")) {
     button.addEventListener("click", () => {
       teamView = button.dataset.team;
-      setAdminView("team");
+      setAdminView("team", { keepSelection: true });
     });
   }
   for (const button of document.querySelectorAll(".manage-tab")) {

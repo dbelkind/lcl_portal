@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=33">
+  <link rel="stylesheet" href="style.css?v=34">
   <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
 <body>
@@ -98,11 +98,14 @@
     </div>
 
     <p id="empty" class="muted" hidden>No unavailable times yet. Add the times you can't be in the lab under <button type="button" class="link-button inline" data-page="update">Update Your Availability</button>.</p>
-    <!-- Team Availability's filters start folded away. -->
+    <!-- Team Availability: everyone's chip is always in view; the group filters start folded away. -->
+    <div id="team-people" class="team-people" hidden>
+      <div class="team-people-head"><strong>Lab members</strong> <span id="team-people-count" class="muted"></span></div>
+      <div id="filters" class="filters" aria-label="Choose lab members to show"></div>
+    </div>
     <details id="team-filters" class="team-filters" hidden>
-      <summary><span class="team-filters-title">Filters</span> <span id="team-filters-count" class="muted"></span></summary>
-      <div id="role-filters" class="role-filters" aria-label="Filter by role"></div>
-      <div id="filters" class="filters" aria-label="Filter by lab member"></div>
+      <summary><span class="team-filters-title">Select by position or training</span></summary>
+      <div id="role-filters" class="role-filters" aria-label="Select by position or training"></div>
     </details>
 
     <div class="calendar-layout">
@@ -451,6 +454,6 @@
   <script src="store.js?v=12"></script>
   <script src="parser.js?v=2"></script>
   <script src="scheduling.js?v=21"></script>
-  <script src="app.js?v=43"></script>
+  <script src="app.js?v=44"></script>
 </body>
 </html>
