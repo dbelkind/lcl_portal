@@ -2113,6 +2113,8 @@ function fillBirthDays(selectedDay) {
 }
 
 function fillProfileForm() {
+  // Only the PI is told their phone number is kept from RAs.
+  document.getElementById("profile-privacy").textContent = `Your name and phone number are shown in the lab directory to everyone in the lab${isPi() ? ", except that RAs don't see your phone number" : ""}. Everything else is only seen by the lab managers, who are reminded before birthdays and graduations.`;
   const monthSelect = document.getElementById("profile-grad-month");
   const yearSelect = document.getElementById("profile-grad-year");
   monthSelect.replaceChildren(optionOf("n/a", "N/A, not a student"), ...MONTH_NAMES.map((name, index) => optionOf(String(index + 1).padStart(2, "0"), name)));
@@ -2309,6 +2311,7 @@ function detailsRows() {
 }
 
 function directoryTable(rows) {
+  // An RA can't read a PI's phone number, so that cell is just left blank rather than saying why.
   const viewerIsRa = !isReviewer() && !isGrad();
   return sortableTable([
     { key: "name", label: "Name", sortValue: byLastName, render: personCell },
@@ -2316,7 +2319,7 @@ function directoryTable(rows) {
     { key: "email", label: "Email", sortValue: (row) => row.email, render: (row) => linkTo(`mailto:${row.email}`, row.email) },
     { key: "phone", label: "Phone", sortValue: (row) => row.phone || "~", render: (row) => {
       if (row.phone) return linkTo(`tel:${row.phone.replace(/[^0-9+]/g, "")}`, row.phone);
-      return el("span", "muted", viewerIsRa && row.title === "PI" ? "Not shown to RAs" : "Not added yet");
+      return viewerIsRa && row.title === "PI" ? el("span", "") : el("span", "muted", "Not added yet");
     } },
   ], rows, directorySort, (sort) => {
     directorySort = sort;
